@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: train-chatbot
+    env: python
+    buildCommand: pip install -r requirements.txt && python -m spacy download en_core_web_sm
+    startCommand: gunicorn main:app
+    plan: free
