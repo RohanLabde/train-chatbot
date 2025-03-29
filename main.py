@@ -47,10 +47,12 @@ def chatbot():
         }
         intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=10)
         intent_data = intent_response.json()
-        if "labels" in intent_data:
-            intent = intent_data["labels"][0]
+        if "labels" in intent_data and "scores" in intent_data:
+            intent_scores = dict(zip(intent_data["labels"], intent_data["scores"]))
+            intent = max(intent_scores, key=intent_scores.get)
+            print("Intent Scores:", intent_scores)
     except Exception as e:
-        print("⚠️ Intent classification error:", str(e))
+        print("\u26a0\ufe0f Intent classification error:", str(e))
 
     # --- 2. Named Entity Recognition (NER) ---
     try:
@@ -66,17 +68,15 @@ def chatbot():
                         source = word
                     elif not destination:
                         destination = word
-                elif entity == "DATE":
-                    if not date:
-                        date = word
+                elif entity == "DATE" and not date:
+                    date = word
                 elif entity == "CARDINAL" and word.isdigit():
                     train_no = word
     except Exception as e:
-        print("⚠️ NER error:", str(e))
+        print("\u26a0\ufe0f NER error:", str(e))
 
     # --- 3. Fallback Entity Extraction with Regex ---
     try:
-        # Fallback for source and destination station codes (like BCT, NDLS)
         src_match = re.search(r'from\s+([A-Z]{3,4})', user_input, re.IGNORECASE)
         dest_match = re.search(r'to\s+([A-Z]{3,4})', user_input, re.IGNORECASE)
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
@@ -90,16 +90,16 @@ def chatbot():
             if parsed_date:
                 date = parsed_date.strftime("%Y-%m-%d")
     except Exception as e:
-        print("⚠️ Regex fallback error:", str(e))
+        print("\u26a0\ufe0f Regex fallback error:", str(e))
 
-    # --- 4. Final fallback for full sentence date parsing ---
+    # --- 4. Full-sentence fallback date parsing ---
     try:
         if not date:
             parsed_date = dateparser.parse(user_input)
             if parsed_date:
                 date = parsed_date.strftime("%Y-%m-%d")
     except Exception as e:
-        print("⚠️ Dateparser fallback error:", str(e))
+        print("\u26a0\ufe0f Dateparser fallback error:", str(e))
 
     result = {
         "intent": intent,
@@ -119,7 +119,7 @@ def chatbot():
             rail_data = rail_response.json()
             result["trains"] = rail_data.get("Trains", [])
         except Exception as e:
-            print("⚠️ Indian Rail API error:", str(e))
+            print("\u26a0\ufe0f Indian Rail API error:", str(e))
             result["trains"] = []
 
     return jsonify(result)
