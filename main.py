@@ -32,39 +32,50 @@ def chatbot():
     data = request.get_json()
     user_input = data.get("message", "")
 
-    # 1. Intent Classification via Hugging Face API
-    intent_payload = {
-        "inputs": user_input,
-        "parameters": {"candidate_labels": INTENT_LABELS}
-    }
-    intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload)
-    intent_data = intent_response.json()
-    intent = intent_data["labels"][0] if "labels" in intent_data else "unknown"
+    # --- 1. Intent Classification ---
+    intent = "unknown"
+    try:
+        intent_payload = {
+            "inputs": user_input,
+            "parameters": {"candidate_labels": INTENT_LABELS}
+        }
+        intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=15)
+        intent_data = intent_response.json()
+        if isinstance(intent_data, dict) and "labels" in intent_data:
+            intent = intent_data["labels"][0]
+    except Exception as e:
+        print("Intent classification error:", e)
 
-    # 2. Entity Recognition via Hugging Face API
-    ner_payload = {"inputs": user_input}
-    ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload)
-    ner_data = ner_response.json()
-
+    # --- 2. Entity Recognition ---
     source = destination = date = train_no = None
-    for ent in ner_data:
-        entity = ent.get("entity_group", "")
-        word = ent.get("word", "")
-        if entity == "LOC":
-            if not source:
-                source = word
-            elif not destination:
-                destination = word
-        elif entity == "DATE":
-            date = word
-        elif entity == "CARDINAL" and word.isdigit():
-            train_no = word
+    try:
+        ner_payload = {"inputs": user_input}
+        ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload, timeout=15)
+        ner_data = ner_response.json()
+        if isinstance(ner_data, list):
+            for ent in ner_data:
+                entity = ent.get("entity_group", "")
+                word = ent.get("word", "")
+                if entity == "LOC":
+                    if not source:
+                        source = word
+                    elif not destination:
+                        destination = word
+                elif entity == "DATE":
+                    date = word
+                elif entity == "CARDINAL" and word.isdigit():
+                    train_no = word
+    except Exception as e:
+        print("NER error:", e)
 
-    # 3. Fallback date parsing using dateparser
-    if not date:
-        parsed_date = dateparser.parse(user_input)
-        if parsed_date:
-            date = parsed_date.strftime("%Y-%m-%d")
+    # --- 3. Fallback date parsing ---
+    try:
+        if not date:
+            parsed_date = dateparser.parse(user_input)
+            if parsed_date:
+                date = parsed_date.strftime("%Y-%m-%d")
+    except Exception as e:
+        print("Dateparser error:", e)
 
     return jsonify({
         "intent": intent,
