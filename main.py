@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import dateparser
 
 app = Flask(__name__)
 
@@ -58,6 +59,12 @@ def chatbot():
             date = word
         elif entity == "CARDINAL" and word.isdigit():
             train_no = word
+
+    # 3. Fallback date parsing using dateparser
+    if not date:
+        parsed_date = dateparser.parse(user_input)
+        if parsed_date:
+            date = parsed_date.strftime("%Y-%m-%d")
 
     return jsonify({
         "intent": intent,
