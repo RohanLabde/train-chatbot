@@ -1,14 +1,19 @@
 from flask import Flask, request, jsonify
-from transformers import pipeline
-import torch
+import requests
+import os
 
 app = Flask(__name__)
 
-# Load Hugging Face pipelines
-ner_pipeline = pipeline("ner", model="dslim/bert-base-NER", grouped_entities=True)
-classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+# Hugging Face API setup
+HF_TOKEN = os.environ.get("HF_API_TOKEN")  # set this in Render environment settings
+HEADERS = {
+    "Authorization": f"Bearer {HF_TOKEN}"
+}
 
-# Define candidate intents
+# Hugging Face model endpoints
+NER_URL = "https://api-inference.huggingface.co/models/dslim/bert-base-NER"
+INTENT_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+
 INTENT_LABELS = [
     "train_search",
     "seat_availability",
@@ -19,46 +24,50 @@ INTENT_LABELS = [
 
 @app.route("/")
 def home():
-    return "🚆 Smart Train Assistant is running!"
+    return "🚆 Train Assistant is running with Hugging Face APIs!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
     user_input = data.get("message", "")
 
-    # Detect intent
-    intent_result = classifier(user_input, INTENT_LABELS)
-    top_intent = intent_result["labels"][0]
+    # 1. Intent Classification via Hugging Face API
+    intent_payload = {
+        "inputs": user_input,
+        "parameters": {"candidate_labels": INTENT_LABELS}
+    }
+    intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload)
+    intent_data = intent_response.json()
+    intent = intent_data["labels"][0] if "labels" in intent_data else "unknown"
 
-    # Extract entities
-    ner_results = ner_pipeline(user_input)
+    # 2. Entity Recognition via Hugging Face API
+    ner_payload = {"inputs": user_input}
+    ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload)
+    ner_data = ner_response.json()
 
-    source = destination = date = train_no = train_class = None
-    for ent in ner_results:
-        label = ent["entity_group"]
-        word = ent["word"]
-        if label == "LOC":
+    source = destination = date = train_no = None
+    for ent in ner_data:
+        entity = ent.get("entity_group", "")
+        word = ent.get("word", "")
+        if entity == "LOC":
             if not source:
                 source = word
             elif not destination:
                 destination = word
-        elif label == "DATE":
+        elif entity == "DATE":
             date = word
-        elif label == "CARDINAL" and word.isdigit():
-            train_no = word  # simplistic assumption
+        elif entity == "CARDINAL" and word.isdigit():
+            train_no = word
 
-    # Build a basic response
-    response = {
-        "intent": top_intent,
+    return jsonify({
+        "intent": intent,
         "entities": {
             "source": source,
             "destination": destination,
             "date": date,
             "train_no": train_no
         }
-    }
-
-    return jsonify(response)
+    })
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
