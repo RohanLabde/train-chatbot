@@ -19,45 +19,50 @@ RAIL_API_KEY = os.environ.get("RAILWAY_API_KEY")
 NER_URL = "https://api-inference.huggingface.co/models/dslim/bert-base-NER"
 INTENT_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
 
-# Supported intent labels
+# Updated intent labels for better matching
 INTENT_LABELS = [
-    "train_search",
-    "seat_availability",
-    "book_ticket",
-    "cancel_ticket",
-    "train_status"
+    "search trains between stations",
+    "check seat availability",
+    "check train running status"
 ]
+
+# Mapping descriptive labels back to internal keys
+INTENT_MAP = {
+    "search trains between stations": "train_search",
+    "check seat availability": "seat_availability",
+    "check train running status": "train_status"
+}
 
 @app.route("/")
 def home():
-    return "🚆 Train Assistant is live using Hugging Face and Indian Rail API."
+    return "🚆 Train Assistant is running with Hugging Face & Indian Rail APIs!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
     user_input = data.get("message", "")
+    
+    # Initialize
     intent = "unknown"
     source = destination = date = train_no = None
 
-    # --- 1. Intent Classification ---
+    # --- 1. Intent Detection ---
     try:
         intent_payload = {
             "inputs": user_input,
-            "parameters": {"candidate_labels": INTENT_LABELS}
+            "parameters": {"candidate_labels": list(INTENT_MAP.keys())}
         }
         intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=10)
         intent_data = intent_response.json()
-        if "labels" in intent_data and "scores" in intent_data:
-            intent_scores = dict(zip(intent_data["labels"], intent_data["scores"]))
-            intent = max(intent_scores, key=intent_scores.get)
-            print("Intent Scores:", intent_scores)
+        if "labels" in intent_data:
+            best_label = intent_data["labels"][0]
+            intent = INTENT_MAP.get(best_label, "unknown")
     except Exception as e:
-        print("\u26a0\ufe0f Intent classification error:", str(e))
+        print("⚠️ Intent detection failed:", str(e))
 
-    # --- 2. Named Entity Recognition (NER) ---
+    # --- 2. Entity Extraction via NER ---
     try:
-        ner_payload = {"inputs": user_input}
-        ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload, timeout=10)
+        ner_response = requests.post(NER_URL, headers=HEADERS, json={"inputs": user_input}, timeout=10)
         ner_data = ner_response.json()
         if isinstance(ner_data, list):
             for ent in ner_data:
@@ -65,17 +70,17 @@ def chatbot():
                 word = ent.get("word", "").replace("##", "")
                 if entity == "LOC":
                     if not source:
-                        source = word
+                        source = word.upper()
                     elif not destination:
-                        destination = word
+                        destination = word.upper()
                 elif entity == "DATE" and not date:
                     date = word
                 elif entity == "CARDINAL" and word.isdigit():
                     train_no = word
     except Exception as e:
-        print("\u26a0\ufe0f NER error:", str(e))
+        print("⚠️ NER failed:", str(e))
 
-    # --- 3. Fallback Entity Extraction with Regex ---
+    # --- 3. Regex Fallback for Entity Extraction ---
     try:
         src_match = re.search(r'from\s+([A-Z]{3,4})', user_input, re.IGNORECASE)
         dest_match = re.search(r'to\s+([A-Z]{3,4})', user_input, re.IGNORECASE)
@@ -90,17 +95,18 @@ def chatbot():
             if parsed_date:
                 date = parsed_date.strftime("%Y-%m-%d")
     except Exception as e:
-        print("\u26a0\ufe0f Regex fallback error:", str(e))
+        print("⚠️ Regex fallback failed:", str(e))
 
-    # --- 4. Full-sentence fallback date parsing ---
+    # --- 4. Full fallback to extract date ---
     try:
         if not date:
             parsed_date = dateparser.parse(user_input)
             if parsed_date:
                 date = parsed_date.strftime("%Y-%m-%d")
     except Exception as e:
-        print("\u26a0\ufe0f Dateparser fallback error:", str(e))
+        print("⚠️ Date parsing failed:", str(e))
 
+    # --- 5. Prepare response ---
     result = {
         "intent": intent,
         "entities": {
@@ -111,7 +117,7 @@ def chatbot():
         }
     }
 
-    # --- 5. Train Search using Indian Rail API ---
+    # --- 6. Query Indian Rail API if needed ---
     if intent == "train_search" and source and destination and date:
         try:
             rail_url = f"https://indianrailapi.com/api/v2/TrainBetweenStations/apikey/{RAIL_API_KEY}/From/{source}/To/{destination}/Date/{date}/"
@@ -119,7 +125,7 @@ def chatbot():
             rail_data = rail_response.json()
             result["trains"] = rail_data.get("Trains", [])
         except Exception as e:
-            print("\u26a0\ufe0f Indian Rail API error:", str(e))
+            print("⚠️ Indian Rail API failed:", str(e))
             result["trains"] = []
 
     return jsonify(result)
