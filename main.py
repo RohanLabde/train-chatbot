@@ -1,45 +1,64 @@
 from flask import Flask, request, jsonify
-import spacy
+from transformers import pipeline
+import torch
 
 app = Flask(__name__)
 
-# Load the spaCy language model
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
-    nlp = spacy.load("en_core_web_sm")
+# Load Hugging Face pipelines
+ner_pipeline = pipeline("ner", model="dslim/bert-base-NER", grouped_entities=True)
+classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+
+# Define candidate intents
+INTENT_LABELS = [
+    "train_search",
+    "seat_availability",
+    "book_ticket",
+    "cancel_ticket",
+    "train_status"
+]
 
 @app.route("/")
 def home():
-    return "🚆 Train Search Chatbot is running!"
+    return "🚆 Smart Train Assistant is running!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
     user_input = data.get("message", "")
 
-    doc = nlp(user_input.lower())
+    # Detect intent
+    intent_result = classifier(user_input, INTENT_LABELS)
+    top_intent = intent_result["labels"][0]
 
-    source = None
-    destination = None
-    date = None
+    # Extract entities
+    ner_results = ner_pipeline(user_input)
 
-    for ent in doc.ents:
-        if ent.label_ == "GPE":  # Geopolitical Entity — often cities/stations
+    source = destination = date = train_no = train_class = None
+    for ent in ner_results:
+        label = ent["entity_group"]
+        word = ent["word"]
+        if label == "LOC":
             if not source:
-                source = ent.text
+                source = word
             elif not destination:
-                destination = ent.text
-        elif ent.label_ == "DATE":
-            date = ent.text
+                destination = word
+        elif label == "DATE":
+            date = word
+        elif label == "CARDINAL" and word.isdigit():
+            train_no = word  # simplistic assumption
 
-    if not source or not destination:
-        return jsonify({"response": "Please mention both source and destination stations."})
+    # Build a basic response
+    response = {
+        "intent": top_intent,
+        "entities": {
+            "source": source,
+            "destination": destination,
+            "date": date,
+            "train_no": train_no
+        }
+    }
 
-    response = f"Searching trains from {source.title()} to {destination.title()}"
-    if date:
-        response += f" on {date.title()}"
+    return jsonify(response)
 
-    return jsonify({"response": response})
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
