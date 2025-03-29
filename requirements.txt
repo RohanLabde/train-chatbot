@@ -1,3 +1,4 @@
 Flask
-spacy
 gunicorn
+transformers
+torch
