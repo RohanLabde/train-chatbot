@@ -6,10 +6,13 @@ import dateparser
 app = Flask(__name__)
 
 # Hugging Face API setup
-HF_TOKEN = os.environ.get("HF_API_TOKEN")  # set this in Render environment settings
+HF_TOKEN = os.environ.get("HF_API_TOKEN")
 HEADERS = {
     "Authorization": f"Bearer {HF_TOKEN}"
 }
+
+# Indian Rail API Key
+RAIL_API_KEY = os.environ.get("RAILWAY_API_KEY")
 
 # Hugging Face model endpoints
 NER_URL = "https://api-inference.huggingface.co/models/dslim/bert-base-NER"
@@ -25,7 +28,7 @@ INTENT_LABELS = [
 
 @app.route("/")
 def home():
-    return "🚆 Train Assistant is running with Hugging Face APIs!"
+    return "🚆 Train Assistant is running with Hugging Face APIs and Indian Rail integration!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
@@ -77,7 +80,7 @@ def chatbot():
     except Exception as e:
         print("Dateparser error:", e)
 
-    return jsonify({
+    result = {
         "intent": intent,
         "entities": {
             "source": source,
@@ -85,7 +88,22 @@ def chatbot():
             "date": date,
             "train_no": train_no
         }
-    })
+    }
+
+    # --- 4. If intent is train_search, call Indian Rail API ---
+    if intent == "train_search" and source and destination and date:
+        try:
+            source = source.upper()
+            destination = destination.upper()
+            rail_url = f"https://indianrailapi.com/api/v2/TrainBetweenStations/apikey/{RAIL_API_KEY}/From/{source}/To/{destination}/Date/{date}/"
+            rail_response = requests.get(rail_url, timeout=20)
+            rail_data = rail_response.json()
+            result["trains"] = rail_data.get("Trains", [])
+        except Exception as e:
+            print("Railway API error:", e)
+            result["trains"] = []
+
+    return jsonify(result)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
