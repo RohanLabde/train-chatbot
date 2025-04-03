@@ -6,124 +6,127 @@ import dateparser
 
 app = Flask(__name__)
 
-# Hugging Face API setup
+# ENV
 HF_TOKEN = os.environ.get("HF_API_TOKEN")
+RAIL_API_KEY = os.environ.get("RAILWAY_API_KEY")
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-# Indian Rail API Key
-RAIL_API_KEY = os.environ.get("RAILWAY_API_KEY")
-
-# Hugging Face model endpoints
+# Hugging Face models
 NER_URL = "https://api-inference.huggingface.co/models/dslim/bert-base-NER"
 INTENT_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
 
-# Intent Labels (only supported ones)
-INTENT_LABELS = ["train_search", "seat_availability", "train_status"]
+# Mapped intents
+INTENT_LABELS = [
+    "find trains between two stations",
+    "check seat availability",
+    "check train running status"
+]
+INTENT_MAP = {
+    "find trains between two stations": "train_search",
+    "check seat availability": "seat_availability",
+    "check train running status": "train_status"
+}
 
 @app.route("/")
 def home():
-    return "🚆 Train Assistant with robust NLP + station code resolution"
+    return "🚆 Train Assistant is running!"
+
+def get_station_code(name):
+    try:
+        url = f"https://indianrailapi.com/api/v2/StationSearch/apikey/{RAIL_API_KEY}/StationCodeOrName/{name}"
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        if data.get("ResponseCode") == "200" and data.get("Stations"):
+            return data["Stations"][0]["StationCode"]
+    except Exception as e:
+        print(f"Station API error for {name}: {e}")
+    return None
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
     user_input = data.get("message", "")
-
     intent = "unknown"
     source = destination = date = train_no = None
 
-    # --- 1. Attempt intent classification ---
+    # Intent Detection
     try:
-        payload = {
+        intent_payload = {
             "inputs": user_input,
             "parameters": {"candidate_labels": INTENT_LABELS}
         }
-        res = requests.post(INTENT_URL, headers=HEADERS, json=payload, timeout=15)
-        intent_data = res.json()
-        if "labels" in intent_data:
-            intent = intent_data["labels"][0]
+        res = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=15).json()
+        label = res.get("labels", [])[0]
+        intent = INTENT_MAP.get(label, "unknown")
     except Exception as e:
-        print("Intent classification failed:", str(e))
+        print("Intent error:", e)
 
-    # --- 2. NLP entity detection via NER ---
+    # Entity Extraction
     try:
-        ner_res = requests.post(NER_URL, headers=HEADERS, json={"inputs": user_input}, timeout=15)
-        ner_data = ner_res.json()
-        if isinstance(ner_data, list):
-            for ent in ner_data:
-                word = ent.get("word", "").replace("##", "")
-                label = ent.get("entity_group", "")
-                if label == "LOC":
-                    if not source:
-                        source = word
-                    elif not destination:
-                        destination = word
-                elif label == "CARDINAL" and word.isdigit():
-                    train_no = word
+        ner_res = requests.post(NER_URL, headers=HEADERS, json={"inputs": user_input}, timeout=10).json()
+        for ent in ner_res:
+            word = ent["word"].replace("##", "")
+            entity = ent["entity_group"]
+            if entity == "LOC":
+                if not source:
+                    source = word
+                elif not destination:
+                    destination = word
+            elif entity == "CARDINAL" and word.isdigit():
+                train_no = word
     except Exception as e:
-        print("NER failed:", str(e))
+        print("NER error:", e)
 
-    # --- 3. Regex fallback for better coverage ---
+    # Regex fallback for locations and date
     try:
-        match = re.search(r'from\s+(.*?)\s+to\s+(.*?)\s+(on|for)', user_input, re.IGNORECASE)
-        if match:
-            source = match.group(1).strip()
-            destination = match.group(2).strip()
-
-        # Extract date if available
+        src_match = re.search(r'from\s+([A-Za-z]+)', user_input, re.IGNORECASE)
+        dest_match = re.search(r'to\s+([A-Za-z]+)', user_input, re.IGNORECASE)
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
+
+        if src_match:
+            source = src_match.group(1)
+        if dest_match:
+            destination = dest_match.group(1)
         if date_match:
-            parsed = dateparser.parse(date_match.group(1))
-            if parsed:
-                date = parsed.strftime("%Y-%m-%d")
+            parsed_date = dateparser.parse(date_match.group(1))
+            if parsed_date:
+                date = parsed_date.strftime("%Y-%m-%d")
     except Exception as e:
-        print("Regex fallback failed:", str(e))
+        print("Regex fallback failed:", e)
 
-    # --- 4. Final fallback for full input date parsing ---
+    # Final date fallback
     if not date:
-        try:
-            parsed = dateparser.parse(user_input)
-            if parsed:
-                date = parsed.strftime("%Y-%m-%d")
-        except:
-            pass
+        parsed_date = dateparser.parse(user_input)
+        if parsed_date:
+            date = parsed_date.strftime("%Y-%m-%d")
 
-    # --- 5. Map station names to codes using IndianRailAPI ---
-    def get_station_code(name):
-        try:
-            url = f"https://indianrailapi.com/api/v2/StationSearch/apikey/{RAIL_API_KEY}/StationName/{name}"
-            r = requests.get(url, timeout=10)
-            js = r.json()
-            if js.get("ResponseCode") == "200":
-                return js.get("Stations")[0].get("StationCode")
-        except:
-            return None
+    # Convert city names to station codes
+    if source:
+        source = get_station_code(source)
+    if destination:
+        destination = get_station_code(destination)
 
-    source_code = get_station_code(source) if source else None
-    destination_code = get_station_code(destination) if destination else None
-
-    # --- 6. Train search logic if all values present ---
     result = {
         "intent": intent,
         "entities": {
-            "source": source_code,
-            "destination": destination_code,
+            "source": source,
+            "destination": destination,
             "date": date,
             "train_no": train_no
         }
     }
 
-    if intent == "train_search" and source_code and destination_code and date:
+    # Final train search
+    if intent == "train_search" and source and destination and date:
         try:
-            url = f"https://indianrailapi.com/api/v2/TrainBetweenStations/apikey/{RAIL_API_KEY}/From/{source_code}/To/{destination_code}/Date/{date}/"
-            response = requests.get(url, timeout=15)
-            trains = response.json().get("Trains", [])
-            result["trains"] = trains
+            url = f"https://indianrailapi.com/api/v2/TrainBetweenStations/apikey/{RAIL_API_KEY}/From/{source}/To/{destination}/Date/{date}/"
+            train_res = requests.get(url, timeout=15).json()
+            result["trains"] = train_res.get("Trains", [])
         except Exception as e:
-            print("Train API call failed:", str(e))
+            print("Train search error:", e)
             result["trains"] = []
 
     return jsonify(result)
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True)
