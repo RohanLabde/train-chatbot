@@ -3,8 +3,10 @@ import requests
 import os
 import re
 import dateparser
+import logging
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # Hugging Face API setup
 HF_TOKEN = os.environ.get("HF_API_TOKEN")
@@ -35,31 +37,41 @@ def chatbot():
     try:
         data = request.get_json()
         user_input = data.get("message", "")
-        print(f"📥 Received user message: {user_input}")
+        logging.info(f"User input: {user_input}")
 
-        # 1. Intent Detection
         intent = "unknown"
+        source = destination = date = train_no = None
+
+        # --- 1. Intent Classification (ML-based) ---
         try:
             intent_payload = {
                 "inputs": user_input,
                 "parameters": {"candidate_labels": INTENT_LABELS}
             }
-            intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=15)
+            intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=10)
             intent_data = intent_response.json()
-            print(f"🧠 Intent Response: {intent_data}")
+            logging.info(f"HF Intent Response: {intent_data}")
             if "labels" in intent_data:
                 intent = intent_data["labels"][0]
         except Exception as e:
-            print(f"❌ Intent classification error: {e}")
+            logging.warning(f"Intent classification failed: {e}")
 
-        # 2. Entity Recognition
-        source = destination = date = train_no = None
+        # --- 2. Keyword-based fallback intent classification ---
+        if intent == "unknown" or intent == "train_status":
+            lowered = user_input.lower()
+            if re.search(r"(show|find|search|get).*train", lowered):
+                intent = "train_search"
+            elif re.search(r"(seat|availability|book.*seat)", lowered):
+                intent = "seat_availability"
+            elif re.search(r"(running|status|late|delay|arrival|departure)", lowered):
+                intent = "train_status"
+
+        # --- 3. Named Entity Recognition (NER) ---
         try:
             ner_payload = {"inputs": user_input}
-            ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload, timeout=15)
+            ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload, timeout=10)
             ner_data = ner_response.json()
-            print(f"📦 NER Response: {ner_data}")
-
+            logging.info(f"NER Response: {ner_data}")
             if isinstance(ner_data, list):
                 for ent in ner_data:
                     entity = ent.get("entity_group", "")
@@ -69,38 +81,39 @@ def chatbot():
                             source = word
                         elif not destination:
                             destination = word
-                    elif entity == "DATE" and not date:
-                        date = word
+                    elif entity == "DATE":
+                        if not date:
+                            date = word
                     elif entity == "CARDINAL" and word.isdigit():
                         train_no = word
         except Exception as e:
-            print(f"❌ NER error: {e}")
+            logging.warning(f"NER error: {e}")
 
-        # 3. Fallback Regex Entity Extraction
+        # --- 4. Fallback Entity Extraction using Regex ---
         try:
-            src_match = re.search(r'from\s+([A-Za-z]+)', user_input, re.IGNORECASE)
-            dest_match = re.search(r'to\s+([A-Za-z]+)', user_input, re.IGNORECASE)
+            src_match = re.search(r'from\s+([a-zA-Z]+)', user_input, re.IGNORECASE)
+            dest_match = re.search(r'to\s+([a-zA-Z]+)', user_input, re.IGNORECASE)
             date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
 
             if src_match:
-                source = src_match.group(1).strip().upper()
+                source = src_match.group(1).upper()
             if dest_match:
-                destination = dest_match.group(1).strip().upper()
+                destination = dest_match.group(1).upper()
             if date_match and not date:
                 parsed_date = dateparser.parse(date_match.group(1))
                 if parsed_date:
                     date = parsed_date.strftime("%Y-%m-%d")
         except Exception as e:
-            print(f"❌ Regex fallback error: {e}")
+            logging.warning(f"Regex fallback error: {e}")
 
-        # 4. Final Fallback Full Date Parsing
+        # --- 5. Fallback full message date parsing ---
         try:
             if not date:
                 parsed_date = dateparser.parse(user_input)
                 if parsed_date:
                     date = parsed_date.strftime("%Y-%m-%d")
         except Exception as e:
-            print(f"❌ Final date parsing error: {e}")
+            logging.warning(f"Date fallback error: {e}")
 
         result = {
             "intent": intent,
@@ -112,24 +125,22 @@ def chatbot():
             }
         }
 
-        # 5. Train Search Integration
+        # --- 6. Train Search API Integration ---
         if intent == "train_search" and source and destination and date:
             try:
-                print(f"🔍 Fetching trains from {source} to {destination} on {date}")
                 rail_url = f"https://indianrailapi.com/api/v2/TrainBetweenStations/apikey/{RAIL_API_KEY}/From/{source}/To/{destination}/Date/{date}/"
                 rail_response = requests.get(rail_url, timeout=15)
                 rail_data = rail_response.json()
                 result["trains"] = rail_data.get("Trains", [])
             except Exception as e:
-                print(f"❌ Indian Rail API error: {e}")
+                logging.error(f"Indian Rail API error: {e}")
                 result["trains"] = []
 
         return jsonify(result)
 
     except Exception as e:
-        print(f"🔥 Critical /chatbot error: {e}")
-        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
-
+        logging.error(f"Unexpected error in chatbot route: {e}")
+        return jsonify({"error": "Something went wrong. Please try again later."}), 500
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=10000)
