@@ -8,9 +8,6 @@ from difflib import get_close_matches
 
 app = Flask(__name__)
 
-# --- Configure logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-
 # --- Load static train data on startup ---
 TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
 try:
@@ -25,8 +22,9 @@ except Exception as e:
 STATION_NAMES = set()
 STATION_CODES = set()
 STATION_NAME_TO_CODE = {}
+
 try:
-    for train_id, train in TRAIN_DATA.items():
+    for train in TRAIN_DATA.values():
         route = train.get("route", [])
         if isinstance(route, list):
             for stop in route:
@@ -36,10 +34,9 @@ try:
                     STATION_CODES.add(code)
                     STATION_NAMES.add(name)
                     STATION_NAME_TO_CODE[name] = code
-        else:
-            logging.warning(f"Train {train_id} has invalid route format: {type(route)}")
+    logging.info(f"✅ Extracted {len(STATION_NAME_TO_CODE)} unique stations.")
 except Exception as e:
-    logging.error("❌ Failed to parse station names and codes.", exc_info=True)
+    logging.error("❌ Failed to build station maps.", exc_info=True)
 
 # --- Supported intent keywords ---
 FALLBACK_INTENTS = {
@@ -50,14 +47,19 @@ FALLBACK_INTENTS = {
 
 def resolve_station_name(input_name):
     upper_input = input_name.upper()
+    logging.info(f"Resolving station: {upper_input}")
+
     if upper_input in STATION_NAME_TO_CODE:
         return STATION_NAME_TO_CODE[upper_input]
     elif upper_input in STATION_CODES:
         return upper_input
     else:
-        match = get_close_matches(upper_input, STATION_NAMES, n=1, cutoff=0.8)
+        match = get_close_matches(upper_input, list(STATION_NAME_TO_CODE.keys()), n=1, cutoff=0.6)
         if match:
-            return STATION_NAME_TO_CODE.get(match[0])
+            logging.info(f"Fuzzy matched: {upper_input} -> {match[0]}")
+            return STATION_NAME_TO_CODE[match[0]]
+
+    logging.warning(f"Station name '{upper_input}' not found in database.")
     return None
 
 @app.route("/")
@@ -73,8 +75,6 @@ def chatbot():
         source = destination = date = train_no = None
         intent = "unknown"
         trains_found = []
-
-        logging.info(f"📩 Received message: {user_input}")
 
         # --- Intent fallback logic ---
         for label, keywords in FALLBACK_INTENTS.items():
@@ -101,22 +101,17 @@ def chatbot():
         if dest_match:
             destination = resolve_station_name(dest_match.group(1))
 
-        logging.info(f"🎯 Intent: {intent}, Source: {source}, Destination: {destination}, Date: {date}")
-
         # --- Train search using static data ---
         if intent == "train_search" and source and destination:
-            for train_id, train in TRAIN_DATA.items():
-                route = train.get("route", [])
-                if not isinstance(route, list):
-                    continue
-                stations = [s.get("station_code") for s in route]
+            for train in TRAIN_DATA.values():
+                stations = [s.get("station_code") for s in train.get("route", []) if isinstance(s, dict)]
                 if source in stations and destination in stations:
                     src_index = stations.index(source)
                     dest_index = stations.index(destination)
                     if src_index < dest_index:
                         trains_found.append({
-                            "train_no": train["train_no"],
-                            "train_name": train["train_name"],
+                            "train_no": train.get("train_no"),
+                            "train_name": train.get("train_name"),
                             "source": source,
                             "destination": destination
                         })
@@ -124,8 +119,8 @@ def chatbot():
         result = {
             "intent": intent,
             "entities": {
-                "source": source,
-                "destination": destination,
+                "source": source if source else "❌ Not found",
+                "destination": destination if destination else "❌ Not found",
                 "date": date,
                 "train_no": train_no
             },
@@ -135,8 +130,9 @@ def chatbot():
         return jsonify(result)
 
     except Exception as e:
-        logging.error("💥 Unhandled exception in chatbot endpoint", exc_info=True)
+        logging.error("❌ Error processing chatbot request", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5000)
