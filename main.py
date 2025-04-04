@@ -1,143 +1,117 @@
 from flask import Flask, request, jsonify
-import requests
 import os
+import json
 import re
 import dateparser
-import time
+import logging
+from difflib import get_close_matches
 
 app = Flask(__name__)
 
-# Hugging Face API setup
-HF_TOKEN = os.environ.get("HF_API_TOKEN")
-HEADERS = {
-    "Authorization": f"Bearer {HF_TOKEN}"
+# --- Load static train data on startup ---
+TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
+try:
+    with open(TRAIN_DATA_FILE, "r", encoding="utf-8") as f:
+        TRAIN_DATA = json.load(f)
+    logging.info(f"✅ Loaded train data with {len(TRAIN_DATA)} trains.")
+except Exception as e:
+    logging.error("❌ Failed to load train data.", exc_info=True)
+    TRAIN_DATA = {}
+
+# --- Build a set of station names and codes ---
+STATION_NAMES = set()
+STATION_CODES = set()
+STATION_NAME_TO_CODE = {}
+for train in TRAIN_DATA.values():
+    for stop in train.get("route", []):
+        code = stop.get("station_code", "").upper()
+        name = stop.get("station_name", "").upper()
+        STATION_CODES.add(code)
+        STATION_NAMES.add(name)
+        STATION_NAME_TO_CODE[name] = code
+
+# --- Supported intent keywords ---
+FALLBACK_INTENTS = {
+    "train_search": ["show me trains", "train between", "trains from", "train to"],
+    "train_status": ["status", "live status", "running status"],
+    "seat_availability": ["seats", "available", "check seat"]
 }
 
-# Indian Rail API Key
-RAIL_API_KEY = os.environ.get("RAILWAY_API_KEY")
-
-# Hugging Face model endpoints
-NER_URL = "https://api-inference.huggingface.co/models/dslim/bert-base-NER"
-INTENT_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-
-# Supported intent labels
-INTENT_LABELS = [
-    "train_search",
-    "seat_availability",
-    "train_status"
-]
-
-# Basic keyword-based fallback for intent detection
-INTENT_KEYWORDS = {
-    "train_search": ["show me trains", "search trains", "find trains", "train from", "train between"],
-    "seat_availability": ["check seat", "seat availability", "available seat", "is seat"],
-    "train_status": ["status of train", "train status", "running status", "live status"]
-}
-
-def fallback_intent_classifier(text):
-    lowered = text.lower()
-    for intent, keywords in INTENT_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in lowered:
-                return intent
-    return "unknown"
-
-def fetch_trains_with_retries(rail_url, max_retries=3, backoff_factor=2):
-    for attempt in range(max_retries):
-        try:
-            print(f"🔁 Attempt {attempt + 1} to fetch train data...")
-            response = requests.get(rail_url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("ResponseCode") == "202":
-                    print("⚠️ Server busy. Retrying...")
-                else:
-                    return data.get("Trains", [])
-            else:
-                print(f"⚠️ Non-200 response: {response.status_code}")
-        except Exception as e:
-            print(f"❌ Error on attempt {attempt + 1}: {str(e)}")
-
-        sleep_time = backoff_factor ** attempt
-        print(f"⏳ Waiting for {sleep_time} seconds before retry...")
-        time.sleep(sleep_time)
-
-    print("❌ All retries failed.")
-    return []
+def resolve_station_name(input_name):
+    upper_input = input_name.upper()
+    if upper_input in STATION_NAME_TO_CODE:
+        return STATION_NAME_TO_CODE[upper_input]
+    elif upper_input in STATION_CODES:
+        return upper_input
+    else:
+        # Try fuzzy match on station names
+        match = get_close_matches(upper_input, STATION_NAMES, n=1, cutoff=0.8)
+        if match:
+            return STATION_NAME_TO_CODE[match[0]]
+    return None
 
 @app.route("/")
 def home():
-    return "🚆 Train Assistant is live using Hugging Face and Indian Rail API."
+    return "🚆 Static Train Assistant is live with offline search!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
-    user_input = data.get("message", "")
-    intent = "unknown"
+    user_input = data.get("message", "").strip()
+
     source = destination = date = train_no = None
+    intent = "unknown"
+    trains_found = []
 
-    # 1. Intent Classification
+    # --- Intent fallback logic ---
     try:
-        intent_payload = {
-            "inputs": user_input,
-            "parameters": {"candidate_labels": INTENT_LABELS}
-        }
-        intent_response = requests.post(INTENT_URL, headers=HEADERS, json=intent_payload, timeout=10)
-        intent_data = intent_response.json()
-        if "labels" in intent_data:
-            intent = intent_data["labels"][0]
+        for label, keywords in FALLBACK_INTENTS.items():
+            for kw in keywords:
+                if kw.lower() in user_input.lower():
+                    intent = label
+                    break
+            if intent != "unknown":
+                break
     except Exception as e:
-        print("⚠️ Intent classification error:", str(e))
+        logging.warning("Intent fallback failed", exc_info=True)
 
-    # Fallback using keywords
-    if intent == "unknown":
-        intent = fallback_intent_classifier(user_input)
-
-    # 2. Named Entity Recognition (NER)
+    # --- Entity extraction using regex ---
     try:
-        ner_payload = {"inputs": user_input}
-        ner_response = requests.post(NER_URL, headers=HEADERS, json=ner_payload, timeout=10)
-        ner_data = ner_response.json()
-        if isinstance(ner_data, list):
-            for ent in ner_data:
-                entity = ent.get("entity_group", "")
-                word = ent.get("word", "").replace("##", "")
-                if entity == "LOC":
-                    if not source:
-                        source = word
-                    elif not destination:
-                        destination = word
-                elif entity == "DATE" and not date:
-                    date = word
-                elif entity == "CARDINAL" and word.isdigit():
-                    train_no = word
-    except Exception as e:
-        print("⚠️ NER error:", str(e))
-
-    # 3. Fallback Entity Extraction with Regex and Date Parsing
-    try:
-        src_match = re.search(r'from\s+([\w]+)', user_input, re.IGNORECASE)
-        dest_match = re.search(r'to\s+([\w]+)', user_input, re.IGNORECASE)
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
+        src_match = re.search(r'from\s+(\w+)', user_input, re.IGNORECASE)
+        dest_match = re.search(r'to\s+(\w+)', user_input, re.IGNORECASE)
 
-        if src_match and not source:
-            source = src_match.group(1).upper()
-        if dest_match and not destination:
-            destination = dest_match.group(1).upper()
-        if date_match and not date:
+        if date_match:
             parsed_date = dateparser.parse(date_match.group(1))
             if parsed_date:
                 date = parsed_date.strftime("%Y-%m-%d")
-    except Exception as e:
-        print("⚠️ Regex fallback error:", str(e))
 
-    try:
-        if not date:
-            parsed_date = dateparser.parse(user_input)
-            if parsed_date:
-                date = parsed_date.strftime("%Y-%m-%d")
+        if src_match:
+            source = resolve_station_name(src_match.group(1))
+
+        if dest_match:
+            destination = resolve_station_name(dest_match.group(1))
+
     except Exception as e:
-        print("⚠️ Dateparser fallback error:", str(e))
+        logging.warning("Regex-based entity extraction failed", exc_info=True)
+
+    # --- Train search using static data ---
+    if intent == "train_search" and source and destination:
+        try:
+            for train in TRAIN_DATA.values():
+                stations = [s.get("station_code") for s in train.get("route", [])]
+                if source in stations and destination in stations:
+                    src_index = stations.index(source)
+                    dest_index = stations.index(destination)
+                    if src_index < dest_index:
+                        trains_found.append({
+                            "train_no": train["train_no"],
+                            "train_name": train["train_name"],
+                            "source": source,
+                            "destination": destination
+                        })
+        except Exception as e:
+            logging.error("❌ Error during train search", exc_info=True)
 
     result = {
         "intent": intent,
@@ -146,20 +120,12 @@ def chatbot():
             "destination": destination,
             "date": date,
             "train_no": train_no
-        }
+        },
+        "trains": trains_found
     }
-
-    # 5. Train Search using Indian Rail API
-    if intent == "train_search" and source and destination:
-        try:
-            # Format: https://indianrailapi.com/api/v2/TrainBetweenStation/apikey/<APIKEY>/From/SRC/To/DST
-            rail_url = f"https://indianrailapi.com/api/v2/TrainBetweenStation/apikey/{RAIL_API_KEY}/From/{source}/To/{destination}"
-            result["trains"] = fetch_trains_with_retries(rail_url)
-        except Exception as e:
-            print("⚠️ Indian Rail API error:", str(e))
-            result["trains"] = []
 
     return jsonify(result)
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=10000)
+    logging.basicConfig(level=logging.INFO)
+    app.run(host="0.0.0.0", port=5000)
