@@ -23,12 +23,17 @@ STATION_NAMES = set()
 STATION_CODES = set()
 STATION_NAME_TO_CODE = {}
 for train in TRAIN_DATA.values():
-    for stop in train.get("route", []):
-        code = stop.get("station_code", "").upper()
-        name = stop.get("station_name", "").upper()
-        STATION_CODES.add(code)
-        STATION_NAMES.add(name)
-        STATION_NAME_TO_CODE[name] = code
+    if isinstance(train, dict):
+        for stop in train.get("route", []):
+            if isinstance(stop, dict):
+                code = stop.get("station_code", "").upper()
+                name = stop.get("station_name", "").upper()
+                if code and name:
+                    STATION_CODES.add(code)
+                    STATION_NAMES.add(name)
+                    STATION_NAME_TO_CODE[name] = code
+    else:
+        logging.warning("⚠️ Skipping invalid train entry (expected dict): %s", train)
 
 # --- Supported intent keywords ---
 FALLBACK_INTENTS = {
@@ -99,17 +104,18 @@ def chatbot():
     if intent == "train_search" and source and destination:
         try:
             for train in TRAIN_DATA.values():
-                stations = [s.get("station_code") for s in train.get("route", [])]
-                if source in stations and destination in stations:
-                    src_index = stations.index(source)
-                    dest_index = stations.index(destination)
-                    if src_index < dest_index:
-                        trains_found.append({
-                            "train_no": train["train_no"],
-                            "train_name": train["train_name"],
-                            "source": source,
-                            "destination": destination
-                        })
+                if isinstance(train, dict):
+                    stations = [s.get("station_code") for s in train.get("route", []) if isinstance(s, dict)]
+                    if source in stations and destination in stations:
+                        src_index = stations.index(source)
+                        dest_index = stations.index(destination)
+                        if src_index < dest_index:
+                            trains_found.append({
+                                "train_no": train["train_no"],
+                                "train_name": train["train_name"],
+                                "source": source,
+                                "destination": destination
+                            })
         except Exception as e:
             logging.error("❌ Error during train search", exc_info=True)
 
