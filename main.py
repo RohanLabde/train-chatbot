@@ -16,23 +16,22 @@ try:
     logging.info(f"✅ Loaded train data with {len(TRAIN_DATA)} trains.")
 except Exception as e:
     logging.error("❌ Failed to load train data.", exc_info=True)
-    TRAIN_DATA = []
+    TRAIN_DATA = {}
 
 # --- Build a set of station names and codes ---
 STATION_NAMES = set()
 STATION_CODES = set()
 STATION_NAME_TO_CODE = {}
+
 try:
-    for train in TRAIN_DATA:
-        route = train.get("route", [])
-        for stop in route:
-            code = stop.get("station_code", "").upper()
-            name = stop.get("station_name", "").upper()
-            if code and name:
+    for train in TRAIN_DATA.values():
+        if isinstance(train, list):
+            for stop in train:
+                code = stop.get("station_code", "").upper()
+                name = stop.get("station_name", "").upper()
                 STATION_CODES.add(code)
                 STATION_NAMES.add(name)
                 STATION_NAME_TO_CODE[name] = code
-    logging.info(f"✅ Built station maps for {len(STATION_NAME_TO_CODE)} stations.")
 except Exception as e:
     logging.error("❌ Failed to build station maps.", exc_info=True)
 
@@ -50,6 +49,7 @@ def resolve_station_name(input_name):
     elif upper_input in STATION_CODES:
         return upper_input
     else:
+        # Try fuzzy match on station names
         match = get_close_matches(upper_input, STATION_NAMES, n=1, cutoff=0.8)
         if match:
             return STATION_NAME_TO_CODE[match[0]]
@@ -103,18 +103,19 @@ def chatbot():
     # --- Train search using static data ---
     if intent == "train_search" and source and destination:
         try:
-            for train in TRAIN_DATA:
-                stations = [s.get("station_code") for s in train.get("route", [])]
-                if source in stations and destination in stations:
-                    src_index = stations.index(source)
-                    dest_index = stations.index(destination)
-                    if src_index < dest_index:
-                        trains_found.append({
-                            "train_no": train["train_no"],
-                            "train_name": train["train_name"],
-                            "source": source,
-                            "destination": destination
-                        })
+            for train in TRAIN_DATA.values():
+                if isinstance(train, list):
+                    stations = [s.get("station_code") for s in train if isinstance(s, dict)]
+                    if source in stations and destination in stations:
+                        src_index = stations.index(source)
+                        dest_index = stations.index(destination)
+                        if src_index < dest_index:
+                            trains_found.append({
+                                "train_no": next((tno for tno, tdata in TRAIN_DATA.items() if tdata == train), None),
+                                "train_name": train[0].get("train_name", "Unknown"),
+                                "source": source,
+                                "destination": destination
+                            })
         except Exception as e:
             logging.error("❌ Error during train search", exc_info=True)
 
