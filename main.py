@@ -18,22 +18,22 @@ except Exception as e:
     logging.error("❌ Failed to load train data.", exc_info=True)
     TRAIN_DATA = {}
 
-# --- Build station maps ---
+# --- Build station sets for fuzzy match ---
+STATION_NAME_TO_CODE = {}
 STATION_NAMES = set()
 STATION_CODES = set()
-STATION_NAME_TO_CODE = {}
 
 try:
     for train in TRAIN_DATA.values():
-        if isinstance(train, dict):
-            for stop in train.get("route", []):
-                name = stop.get("station_name", "").strip().upper()
-                code = stop.get("station_code", "").strip().upper()
-                if name and code:
-                    STATION_NAMES.add(name)
-                    STATION_CODES.add(code)
-                    STATION_NAME_TO_CODE[name] = code
-    logging.info(f"✅ Built station maps with {len(STATION_NAME_TO_CODE)} unique station names.")
+        route = train["route"] if isinstance(train, dict) else []
+        for stop in route:
+            name = stop.get("station_name", "").strip().upper()
+            code = stop.get("station_code", "").strip().upper()
+            if name and code:
+                STATION_NAME_TO_CODE[name] = code
+                STATION_NAMES.add(name)
+                STATION_CODES.add(code)
+    logging.info(f"✅ Indexed {len(STATION_NAMES)} unique station names.")
 except Exception as e:
     logging.error("❌ Failed to build station maps.", exc_info=True)
 
@@ -45,51 +45,44 @@ FALLBACK_INTENTS = {
 }
 
 def resolve_station_name(input_name):
-    try:
-        input_clean = input_name.strip().upper()
-        logging.info(f"🔍 Resolving station name for input: {input_clean}")
-
-        if input_clean in STATION_CODES:
-            logging.info(f"✅ Matched as station code: {input_clean}")
-            return input_clean
-
-        if input_clean in STATION_NAME_TO_CODE:
-            logging.info(f"✅ Matched full station name: {input_clean}")
-            return STATION_NAME_TO_CODE[input_clean]
-
-        # Fuzzy match with difflib
-        fuzzy = get_close_matches(input_clean, STATION_NAME_TO_CODE.keys(), n=1, cutoff=0.7)
-        if fuzzy:
-            logging.info(f"✅ Fuzzy matched to: {fuzzy[0]}")
-            return STATION_NAME_TO_CODE[fuzzy[0]]
-
-        # Substring match
-        for name in STATION_NAME_TO_CODE:
-            if input_clean in name:
-                logging.info(f"✅ Substring matched to: {name}")
-                return STATION_NAME_TO_CODE[name]
-
-        logging.warning(f"❌ No match found for: {input_clean}")
+    if not input_name:
         return None
-    except Exception as e:
-        logging.error("❌ Error during station resolution", exc_info=True)
-        return None
+    name = input_name.strip().upper()
+
+    # Direct match
+    if name in STATION_NAME_TO_CODE:
+        return STATION_NAME_TO_CODE[name]
+    if name in STATION_CODES:
+        return name
+
+    # Fuzzy match (lower cutoff)
+    match = get_close_matches(name, STATION_NAMES, n=1, cutoff=0.6)
+    if match:
+        return STATION_NAME_TO_CODE.get(match[0])
+
+    # Substring fallback
+    for station in STATION_NAMES:
+        if name in station:
+            return STATION_NAME_TO_CODE.get(station)
+
+    logging.warning(f"⚠️ Could not resolve station name: {input_name}")
+    return None
 
 @app.route("/")
 def home():
-    return "🚆 Static Train Assistant is live with fuzzy matching!"
+    return "🚆 Static Train Assistant is live with offline search!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
+    data = request.get_json()
+    user_input = data.get("message", "").strip()
+
+    source = destination = date = train_no = None
+    intent = "unknown"
+    trains_found = []
+
+    # --- Intent fallback logic ---
     try:
-        data = request.get_json()
-        user_input = data.get("message", "").strip()
-
-        source = destination = date = train_no = None
-        intent = "unknown"
-        trains_found = []
-
-        # --- Intent fallback logic ---
         for label, keywords in FALLBACK_INTENTS.items():
             for kw in keywords:
                 if kw.lower() in user_input.lower():
@@ -97,11 +90,14 @@ def chatbot():
                     break
             if intent != "unknown":
                 break
+    except Exception as e:
+        logging.warning("Intent fallback failed", exc_info=True)
 
-        # --- Entity extraction using regex ---
+    # --- Entity extraction using regex ---
+    try:
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
-        src_match = re.search(r'from\s+(\w+)', user_input, re.IGNORECASE)
-        dest_match = re.search(r'to\s+(\w+)', user_input, re.IGNORECASE)
+        src_match = re.search(r'from\s+([\w\s]+)', user_input, re.IGNORECASE)
+        dest_match = re.search(r'to\s+([\w\s]+)', user_input, re.IGNORECASE)
 
         if date_match:
             parsed_date = dateparser.parse(date_match.group(1))
@@ -109,15 +105,17 @@ def chatbot():
                 date = parsed_date.strftime("%Y-%m-%d")
 
         if src_match:
-            source_raw = src_match.group(1)
-            source = resolve_station_name(source_raw)
+            source = resolve_station_name(src_match.group(1))
 
         if dest_match:
-            dest_raw = dest_match.group(1)
-            destination = resolve_station_name(dest_raw)
+            destination = resolve_station_name(dest_match.group(1))
 
-        # --- Train search using static data ---
-        if intent == "train_search" and source and destination:
+    except Exception as e:
+        logging.warning("Regex-based entity extraction failed", exc_info=True)
+
+    # --- Train search using static data ---
+    if intent == "train_search" and source and destination:
+        try:
             for train in TRAIN_DATA.values():
                 stations = [s.get("station_code") for s in train.get("route", [])]
                 if source in stations and destination in stations:
@@ -130,21 +128,21 @@ def chatbot():
                             "source": source,
                             "destination": destination
                         })
+        except Exception as e:
+            logging.error("❌ Error during train search", exc_info=True)
 
-        result = {
-            "intent": intent,
-            "entities": {
-                "source": source,
-                "destination": destination,
-                "date": date,
-                "train_no": train_no
-            },
-            "trains": trains_found
-        }
-        return jsonify(result)
-    except Exception as e:
-        logging.error("❌ Unexpected error in chatbot handler", exc_info=True)
-        return jsonify({"error": "Unexpected server error."}), 500
+    result = {
+        "intent": intent,
+        "entities": {
+            "source": source,
+            "destination": destination,
+            "date": date,
+            "train_no": train_no
+        },
+        "trains": trains_found
+    }
+
+    return jsonify(result)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
