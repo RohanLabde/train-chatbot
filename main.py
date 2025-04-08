@@ -12,48 +12,66 @@ app = Flask(__name__)
 # --- Load static train data on startup ---
 TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
 try:
+    if not os.path.exists(TRAIN_DATA_FILE):
+        raise FileNotFoundError(f"Train data file not found at path: {TRAIN_DATA_FILE}")
+
     with open(TRAIN_DATA_FILE, "r", encoding="utf-8") as f:
         TRAIN_DATA = json.load(f)
+
+    if not isinstance(TRAIN_DATA, dict):
+        raise ValueError("Train data JSON is not a dictionary format")
+
     logging.info(f"✅ Loaded train data with {len(TRAIN_DATA)} trains.")
+    # Log first 2 sample trains
+    for i, (train_no, train_info) in enumerate(TRAIN_DATA.items()):
+        logging.info(f"📄 Sample Train {i+1}: {train_no} - {train_info.get('train_name')}")
+        if i >= 1:
+            break
 except Exception as e:
-    logging.error("❌ Failed to load train data.", exc_info=True)
+    logging.error("❌ Failed to load or validate train data.", exc_info=True)
     TRAIN_DATA = {}
 
 # --- Build a set of station names and codes ---
 STATION_NAME_CODE_PAIRS = set()
 try:
-    for train in TRAIN_DATA.values():
-        if isinstance(train, dict):
-            for stop in train.get("route", []):
+    if TRAIN_DATA:
+        for train in TRAIN_DATA.values():
+            route = train.get("route", [])
+            for stop in route:
                 name = stop.get("station_name", "").strip().upper()
                 code = stop.get("station_code", "").strip().upper()
                 if name and code:
                     STATION_NAME_CODE_PAIRS.add((name, code))
-    logging.info(f"✅ Built station name-code map with {len(STATION_NAME_CODE_PAIRS)} entries.")
-    logging.info(f"🔍 Sample stations: {random.sample(list(STATION_NAME_CODE_PAIRS), 10)}")
+
+        logging.info(f"✅ Built station name-code map with {len(STATION_NAME_CODE_PAIRS)} entries.")
+        sample_size = min(10, len(STATION_NAME_CODE_PAIRS))
+        if sample_size > 0:
+            logging.info(f"🔍 Sample stations: {random.sample(list(STATION_NAME_CODE_PAIRS), sample_size)}")
+    else:
+        logging.warning("⚠️ TRAIN_DATA is empty. Station map cannot be built.")
 except Exception as e:
     logging.error("❌ Failed to build station maps.", exc_info=True)
 
 # --- Helper to resolve station name to code using fuzzy matching ---
 def resolve_station_name(input_text):
     input_text = input_text.strip().upper()
-    input_text = re.sub(r'\s+', ' ', input_text)  # Normalize whitespace
     all_names = [name for name, _ in STATION_NAME_CODE_PAIRS]
     all_codes = [code for _, code in STATION_NAME_CODE_PAIRS]
 
     if input_text in all_codes:
         return input_text
 
+    # Try exact name match
     for name, code in STATION_NAME_CODE_PAIRS:
         if name == input_text:
             return code
 
-    match = get_close_matches(input_text, all_names, n=1, cutoff=0.6)
+    # Try fuzzy match
+    match = get_close_matches(input_text, all_names, n=1, cutoff=0.75)
     if match:
         best_match = match[0]
         for name, code in STATION_NAME_CODE_PAIRS:
             if name == best_match:
-                logging.info(f"✅ Fuzzy match for '{input_text}' → '{name}' → {code}")
                 return code
 
     logging.warning(f"⚠️ Could not resolve station name: {input_text}")
@@ -68,7 +86,7 @@ FALLBACK_INTENTS = {
 
 @app.route("/")
 def home():
-    return "🚆 Static Train Assistant is live with improved fuzzy matching!"
+    return "🚆 Static Train Assistant is live with improved fuzzy matching and robust data loading!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
