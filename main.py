@@ -4,7 +4,6 @@ import json
 import re
 import dateparser
 import logging
-import random
 from difflib import get_close_matches
 
 app = Flask(__name__)
@@ -12,20 +11,20 @@ app = Flask(__name__)
 # --- Load static train data on startup ---
 TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
 try:
-    if not os.path.exists(TRAIN_DATA_FILE):
-        raise FileNotFoundError(f"Train data file not found at path: {TRAIN_DATA_FILE}")
-
     with open(TRAIN_DATA_FILE, "r", encoding="utf-8") as f:
-        TRAIN_DATA = json.load(f)
+        raw_data = json.load(f)
 
-    if not isinstance(TRAIN_DATA, dict):
-        raise ValueError("Train data JSON is not a dictionary format")
+    if isinstance(raw_data, list):
+        TRAIN_DATA = {train.get("train_no"): train for train in raw_data if "train_no" in train}
+    else:
+        TRAIN_DATA = raw_data
 
     logging.info(f"✅ Loaded train data with {len(TRAIN_DATA)} trains.")
-    # Log first 2 sample trains
+
+    # Log a few samples to verify structure
     for i, (train_no, train_info) in enumerate(TRAIN_DATA.items()):
-        logging.info(f"📄 Sample Train {i+1}: {train_no} - {train_info.get('train_name')}")
-        if i >= 1:
+        logging.info(f"📦 Sample Train {i+1}: {train_no} - {train_info.get('train_name')}")
+        if i >= 4:
             break
 except Exception as e:
     logging.error("❌ Failed to load or validate train data.", exc_info=True)
@@ -34,23 +33,16 @@ except Exception as e:
 # --- Build a set of station names and codes ---
 STATION_NAME_CODE_PAIRS = set()
 try:
-    if TRAIN_DATA:
-        for train in TRAIN_DATA.values():
-            route = train.get("route", [])
-            for stop in route:
+    for train in TRAIN_DATA.values():
+        if isinstance(train, dict):
+            for stop in train.get("route", []):
                 name = stop.get("station_name", "").strip().upper()
                 code = stop.get("station_code", "").strip().upper()
                 if name and code:
                     STATION_NAME_CODE_PAIRS.add((name, code))
-
-        logging.info(f"✅ Built station name-code map with {len(STATION_NAME_CODE_PAIRS)} entries.")
-        sample_size = min(10, len(STATION_NAME_CODE_PAIRS))
-        if sample_size > 0:
-            logging.info(f"🔍 Sample stations: {random.sample(list(STATION_NAME_CODE_PAIRS), sample_size)}")
-    else:
-        logging.warning("⚠️ TRAIN_DATA is empty. Station map cannot be built.")
+    logging.info(f"✅ Built station name-code map with {len(STATION_NAME_CODE_PAIRS)} entries.")
 except Exception as e:
-    logging.error("❌ Failed to build station maps.", exc_info=True)
+    logging.warning("⚠️ TRAIN_DATA is empty. Station map cannot be built.", exc_info=True)
 
 # --- Helper to resolve station name to code using fuzzy matching ---
 def resolve_station_name(input_text):
@@ -61,12 +53,10 @@ def resolve_station_name(input_text):
     if input_text in all_codes:
         return input_text
 
-    # Try exact name match
     for name, code in STATION_NAME_CODE_PAIRS:
         if name == input_text:
             return code
 
-    # Try fuzzy match
     match = get_close_matches(input_text, all_names, n=1, cutoff=0.75)
     if match:
         best_match = match[0]
@@ -86,7 +76,7 @@ FALLBACK_INTENTS = {
 
 @app.route("/")
 def home():
-    return "🚆 Static Train Assistant is live with improved fuzzy matching and robust data loading!"
+    return "🚆 Static Train Assistant is live with improved fuzzy matching!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
@@ -97,7 +87,6 @@ def chatbot():
     intent = "unknown"
     trains_found = []
 
-    # --- Intent fallback logic ---
     try:
         for label, keywords in FALLBACK_INTENTS.items():
             for kw in keywords:
@@ -109,7 +98,6 @@ def chatbot():
     except Exception as e:
         logging.warning("Intent fallback failed", exc_info=True)
 
-    # --- Entity extraction using regex ---
     try:
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
         src_match = re.search(r'from\s+([\w\s]+?)(?:\s+to|\s+on|$)', user_input, re.IGNORECASE)
@@ -131,7 +119,6 @@ def chatbot():
     except Exception as e:
         logging.warning("Regex-based entity extraction failed", exc_info=True)
 
-    # --- Train search using static data ---
     if intent == "train_search" and source and destination:
         try:
             for train in TRAIN_DATA.values():
