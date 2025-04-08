@@ -4,6 +4,7 @@ import json
 import re
 import dateparser
 import logging
+import random
 from difflib import get_close_matches
 
 app = Flask(__name__)
@@ -19,23 +20,44 @@ except Exception as e:
     TRAIN_DATA = {}
 
 # --- Build a set of station names and codes ---
-STATION_NAMES = set()
-STATION_CODES = set()
-STATION_NAME_TO_CODE = {}
-
+STATION_NAME_CODE_PAIRS = set()
 try:
     for train in TRAIN_DATA.values():
-        route = train.get("route", [])
-        if isinstance(route, list):
-            for stop in route:
-                code = stop.get("station_code", "").strip().lower()
-                name = stop.get("station_name", "").strip().lower()
-                if code and name:
-                    STATION_CODES.add(code)
-                    STATION_NAMES.add(name)
-                    STATION_NAME_TO_CODE[name] = code
+        if isinstance(train, dict):
+            for stop in train.get("route", []):
+                name = stop.get("station_name", "").strip().upper()
+                code = stop.get("station_code", "").strip().upper()
+                if name and code:
+                    STATION_NAME_CODE_PAIRS.add((name, code))
+    logging.info(f"✅ Built station name-code map with {len(STATION_NAME_CODE_PAIRS)} entries.")
+    logging.info(f"🔍 Sample stations: {random.sample(list(STATION_NAME_CODE_PAIRS), 10)}")
 except Exception as e:
     logging.error("❌ Failed to build station maps.", exc_info=True)
+
+# --- Helper to resolve station name to code using fuzzy matching ---
+def resolve_station_name(input_text):
+    input_text = input_text.strip().upper()
+    input_text = re.sub(r'\s+', ' ', input_text)  # Normalize whitespace
+    all_names = [name for name, _ in STATION_NAME_CODE_PAIRS]
+    all_codes = [code for _, code in STATION_NAME_CODE_PAIRS]
+
+    if input_text in all_codes:
+        return input_text
+
+    for name, code in STATION_NAME_CODE_PAIRS:
+        if name == input_text:
+            return code
+
+    match = get_close_matches(input_text, all_names, n=1, cutoff=0.6)
+    if match:
+        best_match = match[0]
+        for name, code in STATION_NAME_CODE_PAIRS:
+            if name == best_match:
+                logging.info(f"✅ Fuzzy match for '{input_text}' → '{name}' → {code}")
+                return code
+
+    logging.warning(f"⚠️ Could not resolve station name: {input_text}")
+    return None
 
 # --- Supported intent keywords ---
 FALLBACK_INTENTS = {
@@ -44,22 +66,9 @@ FALLBACK_INTENTS = {
     "seat_availability": ["seats", "available", "check seat"]
 }
 
-def resolve_station_name(input_name):
-    cleaned = input_name.strip().lower()
-    if cleaned in STATION_NAME_TO_CODE:
-        return STATION_NAME_TO_CODE[cleaned].upper()
-    elif cleaned in STATION_CODES:
-        return cleaned.upper()
-    else:
-        match = get_close_matches(cleaned, STATION_NAMES, n=1, cutoff=0.75)
-        if match:
-            return STATION_NAME_TO_CODE[match[0]].upper()
-    logging.warning(f"⚠️ Could not resolve station name: {input_name}")
-    return None
-
 @app.route("/")
 def home():
-    return "🚆 Static Train Assistant is live with offline search!"
+    return "🚆 Static Train Assistant is live with improved fuzzy matching!"
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
@@ -82,11 +91,11 @@ def chatbot():
     except Exception as e:
         logging.warning("Intent fallback failed", exc_info=True)
 
-    # --- Entity extraction using improved regex ---
+    # --- Entity extraction using regex ---
     try:
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
-        src_match = re.search(r'from\s+([\w\s]+?)(?=\s+to)', user_input, re.IGNORECASE)
-        dest_match = re.search(r'to\s+([\w\s]+?)(?=\s+on|$)', user_input, re.IGNORECASE)
+        src_match = re.search(r'from\s+([\w\s]+?)(?:\s+to|\s+on|$)', user_input, re.IGNORECASE)
+        dest_match = re.search(r'to\s+([\w\s]+?)(?:\s+on|$)', user_input, re.IGNORECASE)
 
         if date_match:
             parsed_date = dateparser.parse(date_match.group(1))
@@ -94,10 +103,12 @@ def chatbot():
                 date = parsed_date.strftime("%Y-%m-%d")
 
         if src_match:
-            source = resolve_station_name(src_match.group(1))
+            src_text = src_match.group(1).strip()
+            source = resolve_station_name(src_text)
 
         if dest_match:
-            destination = resolve_station_name(dest_match.group(1))
+            dest_text = dest_match.group(1).strip()
+            destination = resolve_station_name(dest_text)
 
     except Exception as e:
         logging.warning("Regex-based entity extraction failed", exc_info=True)
@@ -106,7 +117,7 @@ def chatbot():
     if intent == "train_search" and source and destination:
         try:
             for train in TRAIN_DATA.values():
-                stations = [s.get("station_code", "").upper() for s in train.get("route", [])]
+                stations = [s.get("station_code") for s in train.get("route", [])]
                 if source in stations and destination in stations:
                     src_index = stations.index(source)
                     dest_index = stations.index(destination)
