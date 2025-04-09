@@ -8,19 +8,39 @@ from difflib import get_close_matches
 
 app = Flask(__name__)
 
-# --- Load static train data on startup ---
+# --- Load and transform static train data ---
 TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
+TRAIN_DATA = []
+
 try:
     with open(TRAIN_DATA_FILE, "r", encoding="utf-8") as f:
-        TRAIN_DATA = json.load(f)
-    if isinstance(TRAIN_DATA, list):
-        logging.info(f"✅ Loaded train data: {len(TRAIN_DATA)} trains.")
-        for i, train_info in enumerate(TRAIN_DATA[:5]):
-            train_no = train_info.get("train_no")
-            train_name = train_info.get("train_name")
-            logging.info(f"📦 Sample Train {i+1}: {train_no} - {train_name}")
+        raw_data = json.load(f)
+
+    if isinstance(raw_data, dict):
+        for raw_train_no, stops in raw_data.items():
+            train_no = raw_train_no.strip().replace("'", "")
+            if stops and isinstance(stops, list):
+                train_name = stops[0].get("Train_Name", "").strip()
+                route = []
+                for stop in stops:
+                    route.append({
+                        "station_name": stop.get("Station_Name", "").strip().upper(),
+                        "station_code": stop.get("Station_Code", "").strip().upper(),
+                        "arrival": stop.get("Arrival_Time", "").strip().replace("'", ""),
+                        "departure": stop.get("Departure_Time", "").strip().replace("'", "")
+                    })
+                TRAIN_DATA.append({
+                    "train_no": train_no,
+                    "train_name": train_name,
+                    "route": route
+                })
     else:
-        raise ValueError("Train data is not in expected list format")
+        raise ValueError("Train data is not in expected dictionary format")
+
+    logging.info(f"✅ Loaded train data: {len(TRAIN_DATA)} trains.")
+    for i, train_info in enumerate(TRAIN_DATA[:3]):
+        logging.info(f"📦 Sample Train {i+1}: {train_info.get('train_no')} - {train_info.get('train_name')}")
+
 except Exception as e:
     logging.error("❌ Failed to load or validate train data.", exc_info=True)
     TRAIN_DATA = []
