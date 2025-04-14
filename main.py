@@ -9,7 +9,7 @@ from difflib import get_close_matches
 app = Flask(__name__)
 
 # --- Load and transform static train data ---
-TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
+TRAIN_DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "final_train_data_by_train_no.json")
 TRAIN_DATA = []
 
 try:
@@ -34,18 +34,16 @@ try:
                     "train_name": train_name,
                     "route": route
                 })
+        logging.info(f"✅ Loaded {len(TRAIN_DATA)} trains from data.")
+        logging.info(f"🔍 Example keys: {list(raw_data.keys())[:3]}")
     else:
         raise ValueError("Train data is not in expected dictionary format")
-
-    logging.info(f"✅ Loaded train data: {len(TRAIN_DATA)} trains.")
-    for i, train_info in enumerate(TRAIN_DATA[:3]):
-        logging.info(f"📦 Sample Train {i+1}: {train_info.get('train_no')} - {train_info.get('train_name')}")
 
 except Exception as e:
     logging.error("❌ Failed to load or validate train data.", exc_info=True)
     TRAIN_DATA = []
 
-# --- Build a set of station names and codes ---
+# --- Build station map for fuzzy matching ---
 STATION_NAME_CODE_PAIRS = set()
 if TRAIN_DATA:
     try:
@@ -56,12 +54,12 @@ if TRAIN_DATA:
                 if name and code:
                     STATION_NAME_CODE_PAIRS.add((name, code))
         logging.info(f"✅ Built station map with {len(STATION_NAME_CODE_PAIRS)} entries.")
-    except Exception as e:
+    except Exception:
         logging.error("❌ Failed to build station maps.", exc_info=True)
 else:
     logging.warning("⚠️ TRAIN_DATA is empty. Station map cannot be built.")
 
-# --- Helper to resolve station name to code using fuzzy matching ---
+# --- Fuzzy name resolution ---
 def resolve_station_name(input_text):
     input_text = input_text.strip().upper()
     all_names = [name for name, _ in STATION_NAME_CODE_PAIRS]
@@ -69,7 +67,6 @@ def resolve_station_name(input_text):
 
     if input_text in all_codes:
         return input_text
-
     for name, code in STATION_NAME_CODE_PAIRS:
         if name == input_text:
             return code
@@ -84,7 +81,7 @@ def resolve_station_name(input_text):
     logging.warning(f"⚠️ Could not resolve station name: {input_text}")
     return None
 
-# --- Supported intent keywords ---
+# --- Supported intents ---
 FALLBACK_INTENTS = {
     "train_search": ["show me trains", "train between", "trains from", "train to"],
     "train_status": ["status", "live status", "running status"],
@@ -93,10 +90,13 @@ FALLBACK_INTENTS = {
 
 @app.route("/")
 def home():
-    return "🚆 Static Train Assistant is live with correct TRAIN_DATA loading!"
+    return "🚆 Train Chatbot is running."
 
 @app.route("/chatbot", methods=["POST"])
 def chatbot():
+    if not TRAIN_DATA:
+        return jsonify({"error": "Train data not loaded. Please try again later."}), 500
+
     data = request.get_json()
     user_input = data.get("message", "").strip()
 
@@ -112,7 +112,7 @@ def chatbot():
                     break
             if intent != "unknown":
                 break
-    except Exception as e:
+    except Exception:
         logging.warning("Intent fallback failed", exc_info=True)
 
     try:
@@ -133,7 +133,7 @@ def chatbot():
             dest_text = dest_match.group(1).strip()
             destination = resolve_station_name(dest_text)
 
-    except Exception as e:
+    except Exception:
         logging.warning("Regex-based entity extraction failed", exc_info=True)
 
     if intent == "train_search" and source and destination:
@@ -148,9 +148,10 @@ def chatbot():
                             "train_no": train.get("train_no"),
                             "train_name": train.get("train_name"),
                             "source": source,
-                            "destination": destination
+                            "destination": destination,
+                            "departure_time": train["route"][src_index].get("departure")
                         })
-        except Exception as e:
+        except Exception:
             logging.error("❌ Error during train search", exc_info=True)
 
     result = {
