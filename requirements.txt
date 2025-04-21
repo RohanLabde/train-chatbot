@@ -4,3 +4,4 @@ torch
 gunicorn
 dateparser
 pandas
+flask-cors
