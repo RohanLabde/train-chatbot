@@ -8,7 +8,7 @@ import logging
 from difflib import get_close_matches
 
 app = Flask(__name__)
-CORS(app)  # ✅ Enable CORS to allow frontend requests
+CORS(app)
 
 # --- Load and transform static train data ---
 TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
@@ -40,9 +40,6 @@ try:
         raise ValueError("Train data is not in expected dictionary format")
 
     logging.info(f"✅ Loaded train data: {len(TRAIN_DATA)} trains.")
-    for i, train_info in enumerate(TRAIN_DATA[:3]):
-        logging.info(f"📦 Sample Train {i+1}: {train_info.get('train_no')} - {train_info.get('train_name')}")
-
 except Exception as e:
     logging.error("❌ Failed to load or validate train data.", exc_info=True)
     TRAIN_DATA = []
@@ -50,16 +47,13 @@ except Exception as e:
 # --- Build a set of station names and codes ---
 STATION_NAME_CODE_PAIRS = set()
 if TRAIN_DATA:
-    try:
-        for train in TRAIN_DATA:
-            for stop in train.get("route", []):
-                name = stop.get("station_name", "").strip().upper()
-                code = stop.get("station_code", "").strip().upper()
-                if name and code:
-                    STATION_NAME_CODE_PAIRS.add((name, code))
-        logging.info(f"✅ Built station map with {len(STATION_NAME_CODE_PAIRS)} entries.")
-    except Exception as e:
-        logging.error("❌ Failed to build station maps.", exc_info=True)
+    for train in TRAIN_DATA:
+        for stop in train.get("route", []):
+            name = stop.get("station_name", "").strip().upper()
+            code = stop.get("station_code", "").strip().upper()
+            if name and code:
+                STATION_NAME_CODE_PAIRS.add((name, code))
+    logging.info(f"✅ Built station map with {len(STATION_NAME_CODE_PAIRS)} entries.")
 else:
     logging.warning("⚠️ TRAIN_DATA is empty. Station map cannot be built.")
 
@@ -106,19 +100,16 @@ def chatbot():
     intent = "unknown"
     trains_found = []
 
-    # --- Detect intent from message ---
+    # --- Intent classification ---
     try:
         for label, keywords in FALLBACK_INTENTS.items():
-            for kw in keywords:
-                if kw.lower() in user_input.lower():
-                    intent = label
-                    break
-            if intent != "unknown":
+            if any(kw.lower() in user_input.lower() for kw in keywords):
+                intent = label
                 break
     except Exception as e:
         logging.warning("Intent fallback failed", exc_info=True)
 
-    # --- Extract entities: source, destination, date ---
+    # --- Entity extraction ---
     try:
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
         src_match = re.search(r'from\s+([\w\s]+?)(?:\s+to|\s+on|$)', user_input, re.IGNORECASE)
@@ -130,17 +121,15 @@ def chatbot():
                 date = parsed_date.strftime("%Y-%m-%d")
 
         if src_match:
-            src_text = src_match.group(1).strip()
-            source = resolve_station_name(src_text)
+            source = resolve_station_name(src_match.group(1).strip())
 
         if dest_match:
-            dest_text = dest_match.group(1).strip()
-            destination = resolve_station_name(dest_text)
+            destination = resolve_station_name(dest_match.group(1).strip())
 
     except Exception as e:
         logging.warning("Regex-based entity extraction failed", exc_info=True)
 
-    # --- Perform train search ---
+    # --- Train matching logic ---
     if intent == "train_search" and source and destination:
         try:
             for train in TRAIN_DATA:
@@ -149,19 +138,24 @@ def chatbot():
                     src_index = stations.index(source)
                     dest_index = stations.index(destination)
                     if src_index < dest_index:
-                        source_stop = train["route"][src_index]
-                        dest_stop = train["route"][dest_index]
+                        src_departure = train["route"][src_index].get("departure")
+                        dest_arrival = train["route"][dest_index].get("arrival")
                         trains_found.append({
                             "train_no": train.get("train_no"),
                             "train_name": train.get("train_name"),
                             "source": source,
                             "destination": destination,
-                            "source_departure": source_stop.get("departure", "N/A"),
-                            "destination_arrival": dest_stop.get("arrival", "N/A")
+                            "source_departure": src_departure,
+                            "destination_arrival": dest_arrival
                         })
+
+            # ✅ Sort by departure time
+            trains_found.sort(key=lambda t: t.get("source_departure") or "99:99:99")
+
         except Exception as e:
             logging.error("❌ Error during train search", exc_info=True)
 
+    # --- Final response ---
     result = {
         "intent": intent,
         "entities": {
