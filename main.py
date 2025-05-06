@@ -8,7 +8,7 @@ import logging
 from difflib import get_close_matches
 
 app = Flask(__name__)
-CORS(app)  # ✅ Enable CORS to allow requests from frontend
+CORS(app)  # ✅ Enable CORS to allow frontend requests
 
 # --- Load and transform static train data ---
 TRAIN_DATA_FILE = os.path.join("data", "final_train_data_by_train_no.json")
@@ -102,10 +102,11 @@ def chatbot():
     data = request.get_json()
     user_input = data.get("message", "").strip()
 
-    source = destination = date = train_no = None
+    source = destination = date = None
     intent = "unknown"
     trains_found = []
 
+    # --- Detect intent from message ---
     try:
         for label, keywords in FALLBACK_INTENTS.items():
             for kw in keywords:
@@ -117,6 +118,7 @@ def chatbot():
     except Exception as e:
         logging.warning("Intent fallback failed", exc_info=True)
 
+    # --- Extract entities: source, destination, date ---
     try:
         date_match = re.search(r'on\s+([\w\s\d]+)', user_input, re.IGNORECASE)
         src_match = re.search(r'from\s+([\w\s]+?)(?:\s+to|\s+on|$)', user_input, re.IGNORECASE)
@@ -138,6 +140,7 @@ def chatbot():
     except Exception as e:
         logging.warning("Regex-based entity extraction failed", exc_info=True)
 
+    # --- Perform train search ---
     if intent == "train_search" and source and destination:
         try:
             for train in TRAIN_DATA:
@@ -146,11 +149,15 @@ def chatbot():
                     src_index = stations.index(source)
                     dest_index = stations.index(destination)
                     if src_index < dest_index:
+                        source_stop = train["route"][src_index]
+                        dest_stop = train["route"][dest_index]
                         trains_found.append({
                             "train_no": train.get("train_no"),
                             "train_name": train.get("train_name"),
                             "source": source,
-                            "destination": destination
+                            "destination": destination,
+                            "source_departure": source_stop.get("departure", "N/A"),
+                            "destination_arrival": dest_stop.get("arrival", "N/A")
                         })
         except Exception as e:
             logging.error("❌ Error during train search", exc_info=True)
@@ -160,8 +167,7 @@ def chatbot():
         "entities": {
             "source": source,
             "destination": destination,
-            "date": date,
-            "train_no": train_no
+            "date": date
         },
         "trains": trains_found
     }
